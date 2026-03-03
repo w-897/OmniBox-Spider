@@ -732,7 +732,7 @@ async function detail(params) {
 
         if (episodes.length > 0) {
           let finalSourceName = sourceName;
-          if (driveInfo.driveType === "quark") {
+          if (DRIVE_TYPE_CONFIG.includes(driveInfo.driveType)) {
             finalSourceName = `${displayName}-${sourceName}`;
           }
 
