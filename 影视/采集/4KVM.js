@@ -9,7 +9,7 @@ const http = require("http");
 const cheerio = require("cheerio");
 const OmniBox = require("omnibox_sdk");
 
-// ========== 全局配置 ==========
+// ========== 全局配置 ========== 
 const config = {
     host: "https://www.4kvm.org",
     headers: {
@@ -20,6 +20,9 @@ const config = {
         "Cache-Control": "no-cache"
     }
 };
+
+// 弹幕 API 地址(优先使用环境变量)
+const DANMU_API = process.env.DANMU_API || "";
 
 const axiosInstance = axios.create({
     timeout: 60 * 1000,
@@ -244,17 +247,24 @@ const extractPlayOptions = ($, detailUrl) => {
 
 /**
 * 将播放链接数组转换为 vod_play_sources 格式
+* 拼接格式: URL|视频名|集数名
 */
-const parsePlaySources = (playLinks) => {
+const parsePlaySources = (playLinks, vodName) => {
     if (!playLinks || playLinks.length === 0) {
         return [];
     }
-
     const episodes = playLinks.map(link => {
         const parts = link.split('$');
+        const episodeName = parts[0] || '正片';
+        const actualUrl = parts[1] || parts[0];
+
+        // 关键修改：将 URL、视频名、集数名 拼接到一起
+        // 使用 | 分隔，并对包含 | 的内容进行处理（通常URL和标题不含|）
+        const combinedId = `${actualUrl}|${vodName}|${episodeName}`;
+
         return {
-            name: parts[0] || '正片',
-            playId: parts[1] || parts[0]
+            name: episodeName,
+            playId: combinedId
         };
     }).filter(e => e.playId);
 
@@ -263,7 +273,6 @@ const parsePlaySources = (playLinks) => {
         episodes: episodes
     }];
 };
-
 /**
 * 过滤电视剧内容
 */
@@ -338,6 +347,210 @@ const filterSearchResults = (results, searchKey) => {
     return filtered;
 };
 
+/**
+ * 预处理标题，去掉常见干扰项
+ */
+function preprocessTitle(title) {
+  if (!title) return "";
+  return title
+    .replace(/4[kK]|[xX]26[45]|720[pP]|1080[pP]|2160[pP]|1280x720|1920x1080/g, " ")
+    .replace(/[hH]\.?26[45]/g, " ")
+    .replace(/BluRay|WEB-DL|HDR|REMUX/gi, " ")
+    .replace(/\.mp4|\.mkv|\.avi|\.flv/gi, " ");
+}
+
+/**
+ * 将中文数字转换为阿拉伯数字 (简单实现)
+ */
+function chineseToArabic(cn) {
+  const map = { '零': 0, '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10 };
+  if (!isNaN(cn)) return parseInt(cn);
+  if (cn.length === 1) return map[cn] || cn;
+  if (cn.length === 2) {
+    if (cn[0] === '十') return 10 + map[cn[1]];
+    if (cn[1] === '十') return map[cn[0]] * 10;
+  }
+  if (cn.length === 3) return map[cn[0]] * 10 + map[cn[2]];
+  return cn;
+}
+
+/**
+ * 核心：从标题中提取集数数字
+ */
+function extractEpisode(title) {
+  if (!title) return "";
+
+  const processedTitle = preprocessTitle(title).trim();
+
+  // 1. S01E03 格式
+  const seMatch = processedTitle.match(/[Ss](?:\d{1,2})?[-._\s]*[Ee](\d{1,3})/i);
+  if (seMatch) return seMatch[1];
+
+  // 2. 中文格式：第XX集/话
+  const cnMatch = processedTitle.match(/第\s*([零一二三四五六七八九十0-9]+)\s*[集话章节回期]/);
+  if (cnMatch) return String(chineseToArabic(cnMatch[1]));
+
+  // 3. EP/E 格式
+  const epMatch = processedTitle.match(/\b(?:EP|E)[-._\s]*(\d{1,3})\b/i);
+  if (epMatch) return epMatch[1];
+
+  // 4. 括号格式 [03]
+  const bracketMatch = processedTitle.match(/[\[\(【（](\d{1,3})[\]\)】）]/);
+  if (bracketMatch) {
+    const num = bracketMatch[1];
+    // 排除常见分辨率
+    if (!["720", "1080", "480"].includes(num)) return num;
+  }
+
+  // 5. 独立的数字 (排除常见的视频参数)
+  const standaloneMatches = processedTitle.match(/(?:^|[\s\-\._\[\]])(\d{1,3})(?![0-9pP])/g);
+  if (standaloneMatches) {
+    const candidates = standaloneMatches
+      .map(m => m.match(/\d+/)[0])
+      .filter(num => {
+        const n = parseInt(num);
+        return n > 0 && n < 300 && !["720", "480", "264", "265"].includes(num);
+      });
+    
+    if (candidates.length > 0) {
+      // 优先取 1-99 之间的
+      const normalEp = candidates.find(n => parseInt(n) < 100);
+      return normalEp || candidates[0];
+    }
+  }
+
+  return "";
+}
+
+/**
+* 根据播放URL推断文件名(用于弹幕匹配)
+*/
+function inferFileNameFromURL(url) {
+    try {
+        const urlObj = new URL(url);
+        let base = urlObj.pathname.split("/").pop() || "";
+
+        // 去掉扩展名
+        const dotIndex = base.lastIndexOf(".");
+        if (dotIndex > 0) {
+            base = base.substring(0, dotIndex);
+        }
+
+        // 清理分隔符
+        base = base.replace(/[_-]/g, " ").replace(/\./g, " ").trim();
+
+        return base || url;
+    } catch (error) {
+        return url;
+    }
+}
+
+/**
+* 匹配弹幕
+*/
+async function matchDanmu(fileName) {
+    if (!DANMU_API || !fileName) {
+        return [];
+    }
+
+    try {
+        logInfo(`匹配弹幕: ${fileName}`);
+
+        const matchUrl = `${DANMU_API}/api/v2/match`;
+        const response = await OmniBox.request(matchUrl, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            },
+            body: JSON.stringify({ fileName: fileName }),
+        });
+
+        if (response.statusCode !== 200) {
+            logInfo(`弹幕匹配失败: HTTP ${response.statusCode}`);
+            return [];
+        }
+
+        const matchData = JSON.parse(response.body);
+
+        // 检查是否匹配成功
+        if (!matchData.isMatched) {
+            logInfo("弹幕未匹配到");
+            return [];
+        }
+
+        // 获取matches数组
+        const matches = matchData.matches || [];
+        if (matches.length === 0) {
+            return [];
+        }
+
+        // 取第一个匹配项
+        const firstMatch = matches[0];
+        const episodeId = firstMatch.episodeId;
+        const animeTitle = firstMatch.animeTitle || "";
+        const episodeTitle = firstMatch.episodeTitle || "";
+
+        if (!episodeId) {
+            return [];
+        }
+
+        // 构建弹幕名称
+        let danmakuName = "弹幕";
+        if (animeTitle && episodeTitle) {
+            danmakuName = `${animeTitle} - ${episodeTitle}`;
+        } else if (animeTitle) {
+            danmakuName = animeTitle;
+        } else if (episodeTitle) {
+            danmakuName = episodeTitle;
+        }
+
+        // 构建弹幕URL
+        const danmakuURL = `${DANMU_API}/api/v2/comment/${episodeId}?format=xml`;
+
+        logInfo(`弹幕匹配成功: ${danmakuName}`);
+
+        return [
+            {
+                name: danmakuName,
+                url: danmakuURL,
+            },
+        ];
+    } catch (error) {
+        logInfo(`弹幕匹配失败: ${error.message}`);
+        return [];
+    }
+}
+
+/**
+* 构建用于弹幕匹配的文件名
+*/
+function buildFileNameForDanmu(vodName, episodeTitle) {
+    if (!vodName) return "";
+
+    // 如果没有集数信息，直接返回视频名（电影）
+    if (!episodeTitle || episodeTitle === '正片' || episodeTitle === '播放') {
+        return vodName;
+    }
+
+    // 提取集数
+    const digits = extractEpisode(episodeTitle);
+    if (digits) {
+        const epNum = parseInt(digits, 10);
+        if (epNum > 0) {
+            // 构建标准格式：视频名 S01E01
+            if (epNum < 10) {
+                return `${vodName} S01E0${epNum}`;
+            } else {
+                return `${vodName} S01E${epNum}`;
+            }
+        }
+    }
+
+    // 无法提取集数，返回视频名
+    return vodName;
+}
+
 // ========== 接口实现 ==========
 
 /**
@@ -345,11 +558,11 @@ const filterSearchResults = (results, searchKey) => {
 */
 async function home(params) {
     logInfo("进入首页");
-    
+
     try {
         const response = await axiosInstance.get(config.host, { headers: config.headers });
         const $ = cheerio.load(response.data);
-        
+
         // 提取分类
         const classes = [];
         $('header .head-main-nav ul.main-header > li').each((_, element) => {
@@ -364,7 +577,7 @@ async function home(params) {
                     type_id: normalizedLink,
                     type_name: name
                 });
-                
+
                 // 提取子分类
                 $el.find('ul li').each((_, subElement) => {
                     const $sub = $(subElement);
@@ -380,12 +593,12 @@ async function home(params) {
                 });
             }
         });
-        
+
         // 获取首页推荐列表
         const homeList = getVideoList($, 'article, .module .content .items .item, .movies-list article');
-        
+
         logInfo(`分类获取完成,共 ${classes.length} 个`);
-        
+
         return {
             class: classes,
             list: homeList
@@ -491,7 +704,7 @@ async function detail(params) {
         }
 
         // 转换为 vod_play_sources 格式
-        vod.vod_play_sources = parsePlaySources(playLinks);
+        vod.vod_play_sources = parsePlaySources(playLinks, vod.vod_name);
 
         logInfo(`播放链接数: ${playLinks.length}`);
 
@@ -541,8 +754,21 @@ async function search(params) {
 * 播放
 */
 async function play(params) {
-    const playId = params.playId;
-    logInfo(`准备播放 ID: ${playId}`);
+    let playId = params.playId;
+    const flag = params.flag || "";
+    logInfo(`准备播放 ID: ${playId}, flag: ${flag}`);
+
+    let vodName = "";
+    let episodeName = "";
+
+    // 关键修改：解析透传参数
+    if (playId.includes('|')) {
+        const parts = playId.split('|');
+        playId = parts[0];      // 真正的 URL
+        vodName = parts[1] || "";
+        episodeName = parts[2] || "";
+        logInfo(`解析透传信息 - 视频: ${vodName}, 集数: ${episodeName}`);
+    }
 
     try {
         // 解析参数
@@ -563,6 +789,12 @@ async function play(params) {
             }
         }
 
+        let playResponse = {
+            urls: [{ name: "4KVM", url: playId }],
+            parse: 1,
+            header: config.headers
+        };
+
         // API调用
         if (dataPost && dataNume) {
             try {
@@ -582,55 +814,60 @@ async function play(params) {
                     ) ? 0 : 1;
 
                     logInfo(`API解析成功: ${embedUrl}`);
-                    return {
-                        urls: [{ name: "4KVM", url: embedUrl }],
-                        parse: parseFlag,
-                        header: config.headers
-                    };
+                    playResponse.urls = [{ name: "4KVM", url: embedUrl }];
+                    playResponse.parse = parseFlag;
                 }
             } catch (error) {
                 logError("API调用失败", error);
             }
         }
 
-        // 页面解析回退
-        const response = await axiosInstance.get(baseUrl, { headers: config.headers });
-        const $ = cheerio.load(response.data);
+        // 如果API调用失败，页面解析回退
+        if (playResponse.urls[0].url === playId) {
+            const response = await axiosInstance.get(baseUrl, { headers: config.headers });
+            const $ = cheerio.load(response.data);
 
-        // 查找iframe
-        const iframe = $('iframe.metaframe, .dooplay_player iframe, .player iframe').first().attr('src');
-        if (iframe) {
-            const iframeUrl = normalizeUrl(iframe);
-            const parseFlag = ['.m3u8', '.mp4', '.flv'].some(ext =>
-                iframeUrl.toLowerCase().includes(ext)
-            ) ? 0 : 1;
+            // 查找iframe
+            const iframe = $('iframe.metaframe, .dooplay_player iframe, .player iframe').first().attr('src');
+            if (iframe) {
+                const iframeUrl = normalizeUrl(iframe);
+                const parseFlag = ['.m3u8', '.mp4', '.flv'].some(ext =>
+                    iframeUrl.toLowerCase().includes(ext)
+                ) ? 0 : 1;
 
-            logInfo(`Iframe解析: ${iframeUrl}`);
-            return {
-                urls: [{ name: "4KVM", url: iframeUrl }],
-                parse: parseFlag,
-                header: config.headers
-            };
+                logInfo(`Iframe解析: ${iframeUrl}`);
+                playResponse.urls = [{ name: "4KVM", url: iframeUrl }];
+                playResponse.parse = parseFlag;
+            } else {
+                // 查找video标签
+                const videoSrc = normalizeUrl($('video source, video').first().attr('src'));
+                if (videoSrc) {
+                    logInfo(`Video标签解析: ${videoSrc}`);
+                    playResponse.urls = [{ name: "4KVM", url: videoSrc }];
+                    playResponse.parse = 0;
+                }
+            }
         }
 
-        // 查找video标签
-        const videoSrc = normalizeUrl($('video source, video').first().attr('src'));
-        if (videoSrc) {
-            logInfo(`Video标签解析: ${videoSrc}`);
-            return {
-                urls: [{ name: "4KVM", url: videoSrc }],
-                parse: 0,
-                header: config.headers
-            };
+        OmniBox.log("info", `DANMU_API: ${DANMU_API}, params.vodName：${params.vodName}`);
+
+        // 弹幕匹配
+        if (DANMU_API && (vodName || params.vodName)) {
+            const finalVodName = vodName || params.vodName;
+            const finalEpisodeName = episodeName || params.episodeName || '';
+
+            const fileName = buildFileNameForDanmu(finalVodName, finalEpisodeName);
+            logInfo(`尝试匹配弹幕文件名: ${fileName}`);
+
+            if (fileName) {
+                const danmakuList = await matchDanmu(fileName);
+                if (danmakuList && danmakuList.length > 0) {
+                    playResponse.danmaku = danmakuList;
+                }
+            }
         }
 
-        // 使用默认播放
-        logInfo(`使用默认播放: ${baseUrl}`);
-        return {
-            urls: [{ name: "4KVM", url: baseUrl }],
-            parse: 1,
-            header: config.headers
-        };
+        return playResponse;
     } catch (error) {
         logError("播放解析失败", error);
         return {
