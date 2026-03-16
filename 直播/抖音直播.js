@@ -1,3 +1,10 @@
+// @name 抖音直播
+// @author 
+// @description 
+// @dependencies: axios, crypto
+// @version 1.0.0
+// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/直播/抖音直播.js
+
 /**
  * ============================================================================
  * 抖音直播 - OmniBox 爬虫脚本
