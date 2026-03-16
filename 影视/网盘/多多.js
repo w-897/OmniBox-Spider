@@ -1,5 +1,10 @@
-// @name 玩偶系模板
-// @version 1.0.1
+// @name 多多
+// @author
+// @description 刮削：支持，弹幕：支持，播放记录：支持
+// @dependencies: axios, cheerio
+// @version 1.0.0
+// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/网盘/多多.js
+
 // 引入 OmniBox SDK
 const OmniBox = require("omnibox_sdk");
 // 引入 cheerio(用于 HTML 解析)
@@ -13,7 +18,7 @@ const fs = require("fs");
 
 // ==================== 配置区域 ====================
 // 网站地址(可以通过环境变量配置,支持多个域名用;分割)
-const WEB_SITE_CONFIG = process.env.WEB_SITE_MUOU || "https://tv.yydsys.top;https://tv.214521.xyz;https://tv.yydsys.cc;https://yydsys.de5.net;https://duo.hidns.vip";
+const WEB_SITE_CONFIG = process.env.WEB_SITE_DUODUO || "https://tv.yydsys.top;https://tv.214521.xyz;https://tv.yydsys.cc;https://yydsys.de5.net;https://duo.hidns.vip";
 const WEB_SITES = WEB_SITE_CONFIG.split(';').map(url => url.trim()).filter(url => url);
 // 筛选配置: 环境变量 -> 本地文件 -> 远程链接
 const FILTERS_PATH_REMOTE = "https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/blob/main/%E9%85%8D%E7%BD%AE/%E7%AD%9B%E9%80%89/duoduo.json";
@@ -740,8 +745,7 @@ async function detail(params) {
           allVideoFiles,
           scrapeData,
           videoMappings,
-          scrapeType,
-          sourceId
+          scrapeType
         };
 
       } catch (error) {
