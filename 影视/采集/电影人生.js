@@ -2,7 +2,7 @@
 // @author 梦
 // @description 页面解析：已接入；播放：解析页面 /api/m3u8 并跟随到最终可播 m3u8
 // @dependencies cheerio
-// @version 1.0.1
+// @version 1.0.2
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/电影人生.js
 
 const OmniBox = require("omnibox_sdk");
@@ -392,7 +392,8 @@ async function play(params, context) {
 
       const result = {
         parse: 0,
-        url: finalUrl,
+        // url: finalUrl,
+        urls: [{ name: meta.title || "播放页", url: finalUrl }],
         flag: "m3u8",
       };
       await OmniBox.log("info", `[电影人生][play] 直返 ${finalUrl}`);
